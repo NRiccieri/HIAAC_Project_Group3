@@ -1,0 +1,114 @@
+!pip install tensorflow_federated
+import tensorflow as tf
+import tensorflow_federated as tff
+import fed_compression
+import dnn_models as dnn
+
+from config import *
+from pathlib import Path
+from utils import plot_graph
+from datetime import datetime
+from dataset import load_dataset
+from matplotlib import pyplot as plt
+from tensorflow.keras import losses, metrics, optimizers
+
+now = datetime.now()
+date_time = now.strftime("%d.%m.%Y__%H.%M.%S")
+
+this_dir = Path.cwd()
+model_dir = this_dir / "saved_models" / name_dt / str(datetime)
+output_dir = this_dir / "results" / name_dt / str(datetime)
+
+if not model_dir.exists():
+    model_dir.mkdir(parents=True)
+
+if not output_dir.exists():
+    output_dir.mkdir(parents=True)
+
+
+federated_train_data, preprocessed_sample_dataset = load_dataset(phase='train')
+
+
+def model_fn():
+    # We _must_ create a new model here, and _not_ capture it from an external
+    # scope. TFF will call this within different graph contexts.
+
+    keras_model = dnn.keras_model(model_name)
+    return tff.learning.from_keras_model(
+        keras_model,
+        input_spec=preprocessed_sample_dataset.element_spec,
+        loss=losses.CategoricalCrossentropy(),
+        metrics=[metrics.CategoricalAccuracy()])
+
+
+iterative_process = fed_compression.build_federated_averaging_process(
+    model_fn,
+    client_optimizer_fn=lambda: optimizers.Adam(learning_rate=client_lr),
+    server_optimizer_fn=lambda: optimizers.SGD(learning_rate=server_lr))
+
+
+print(str(iterative_process.initialize.type_signature))
+state = iterative_process.initialize()
+
+
+x_test, y_test = load_dataset(phase='test')
+
+tff_train_acc = []
+tff_val_acc = []
+tff_train_loss = []
+tff_val_loss = []
+
+eval_model = None
+for round_num in range(1, NUM_ROUNDS+1):
+    state, tff_metrics = iterative_process.next(state, federated_train_data)
+    keras_model = dnn.keras_model(model_name)
+    eval_model.compile(optimizer=optimizers.Adam(learning_rate=client_lr),
+                       loss=losses.SparseCategoricalCrossentropy(),
+                       metrics=[metrics.SparseCategoricalAccuracy()])
+
+    tff.learning.assign_weights_to_keras_model(eval_model, state.model)
+
+    ev_result = eval_model.evaluate(x_test, y_test, verbose=0)
+    print('round {:2d}, metrics={}'.format(round_num, tff_metrics))
+    print(f"Eval loss : {ev_result[0]} and Eval accuracy : {ev_result[1]}")
+    tff_train_acc.append(float(tff_metrics.sparse_categorical_accuracy))
+    tff_val_acc.append(ev_result[1])
+    tff_train_loss.append(float(tff_metrics.loss))
+    tff_val_loss.append(ev_result[0])
+
+metric_collection = {"sparse_categorical_accuracy": tff_train_acc,
+                     "val_sparse_categorical_accuracy": tff_val_acc,
+                     "loss": tff_train_loss,
+                     "val_loss": tff_val_loss}
+
+if eval_model:
+    eval_model.save(model_dir / (name_dt + ".h5"))
+else:
+    print("training didn't started")
+    exit()
+
+fig = plt.figure(figsize=(10, 6))
+plot_graph(list(range(1, 26))[4::5], tff_train_acc, label='Train Accuracy')
+plot_graph(list(range(1, 26))[4::5], tff_val_acc, label='Validation Accuracy')
+plt.legend()
+plt.savefig(output_dir / "federated_model_Accuracy.png")
+
+plt.figure(figsize=(10, 6))
+plot_graph(list(range(1, 26))[4::5], tff_train_loss, label='Train loss')
+plot_graph(list(range(1, 26))[4::5], tff_val_loss, label='Validation loss')
+plt.legend()
+plt.savefig(output_dir / "federated_model_loss.png")
+
+
+
+# saving metric values to text file
+
+txt_file_path = output_dir / (name_dt + ".txt")
+with open(txt_file_path.as_posix(), "w") as handle:
+    content = []
+    for key, val in metric_collection.items():
+        line_content = key
+        val = [str(k) for k in val]
+        line_content = line_content + " " + " ".join(val)
+        content.append(line_content)
+    handle.write("\n".join(content))
