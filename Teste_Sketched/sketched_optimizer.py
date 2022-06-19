@@ -249,7 +249,6 @@ class SketchedSum:
             # elements that we're going to sketch, i.e. sketchMask.sum()
             self.workerSketches = [CSVec(d=self.sketchMask.sum().item(),
                                          c=c, r=r,
-                                         device=self.device,
                                          numBlocks=numBlocks)
                                    for _ in range(numWorkers)]
         else:
@@ -627,7 +626,7 @@ class SketchedSum:
             candidateHHCoords = candidateTopk.nonzero()
             # get exact values for candidateHHCoords
             #candidateTopk.zero_()
-            candidateTopk = torch.zeros_like(candidateTopk)
+            candidateTopk = torch.zeros_like(torch.tensor(candidateTopk))
             if self.opt.doTransferHalf:
                 candidateTopk.half_()
             for v in vs:
